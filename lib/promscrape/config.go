@@ -11,6 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VictoriaMetrics/metrics"
+	xxhash "github.com/cespare/xxhash/v2"
+	"gopkg.in/yaml.v2"
+
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/cgroup"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/envtemplate"
@@ -31,9 +35,6 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promscrape/discovery/kubernetes"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promscrape/discovery/openstack"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/proxy"
-	"github.com/VictoriaMetrics/metrics"
-	xxhash "github.com/cespare/xxhash/v2"
-	"gopkg.in/yaml.v2"
 )
 
 var (
@@ -51,6 +52,8 @@ var (
 		"Each member then scrapes roughly 1/N of all the targets. By default cluster scraping is disabled, i.e. a single scraper scrapes all the targets")
 	clusterMemberNum = flag.Int("promscrape.cluster.memberNum", 0, "The number of number in the cluster of scrapers. "+
 		"It must be an unique value in the range 0 ... promscrape.cluster.membersCount-1 across scrapers in the cluster")
+	clusterMemberPodName = flag.String("promscrape.cluster.memberPodName", "", "The pod name of number in the cluster of scrapers. "+
+		"When vmagent run as statefulset on kubernetes cluster")
 	clusterReplicationFactor = flag.Int("promscrape.cluster.replicationFactor", 1, "The number of members in the cluster, which scrape the same targets. "+
 		"If the replication factor is greater than 2, then the deduplication must be enabled at remote storage side. See https://docs.victoriametrics.com/#deduplication")
 )
@@ -994,7 +997,23 @@ func (swc *scrapeWorkConfig) getScrapeWork(target string, extraLabels, metaLabel
 	if *clusterMembersCount > 1 {
 		bb := scrapeWorkKeyBufPool.Get()
 		bb.B = appendScrapeWorkKey(bb.B[:0], labels)
-		needSkip := needSkipScrapeWork(bytesutil.ToUnsafeString(bb.B), *clusterMembersCount, *clusterReplicationFactor, *clusterMemberNum)
+
+		memberNum := *clusterMemberNum
+		if clusterMemberPodName != nil && *clusterMemberPodName != "" {
+			sp := strings.Split(*clusterMemberPodName, "-")
+			if len(sp) == 0 {
+				return nil, fmt.Errorf("-promscrape.cluster.memberPodName format must have '-indexNumber' suffix")
+			}
+
+			num, err := strconv.Atoi(sp[len(sp)-1])
+			if err != nil {
+				return nil, fmt.Errorf("-promscrape.cluster.memberPodName '-indexNumber' suffix must be int %w", err)
+			}
+
+			memberNum = num
+		}
+
+		needSkip := needSkipScrapeWork(bytesutil.ToUnsafeString(bb.B), *clusterMembersCount, *clusterReplicationFactor, memberNum)
 		scrapeWorkKeyBufPool.Put(bb)
 		if needSkip {
 			return nil, nil
